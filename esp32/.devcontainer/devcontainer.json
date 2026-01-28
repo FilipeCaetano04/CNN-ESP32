@@ -20,10 +20,8 @@
 		}
 	},
 	// --privileged permite acesso total ao hardware (USB)
-	"runArgs": ["--privileged"],
-    
-    // Opcional: Mapeia a pasta /dev para garantir que /dev/ttyUSB0 apareça
-    "mounts": [
-        "source=/dev,target=/dev,type=bind"
-    ]
+	"runArgs": [
+  "--privileged"
+]
+
 }
