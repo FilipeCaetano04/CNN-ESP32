@@ -21,7 +21,8 @@
 	},
 	// --privileged permite acesso total ao hardware (USB)
 	"runArgs": [
-  "--privileged"
+  "--privileged",
+  "--device=/dev/ttyUSB0"
 ]
 
 }

@@ -133,7 +133,21 @@ extern "C" void app_main(void) {
 
   // 2) Resolver Ops
   // Para começar: AllOpsResolver (mais pesado, mas evita "Op not found")
-static tflite::MicroMutableOpResolver<10> resolver;
+static tflite::MicroMutableOpResolver<13> resolver;
+resolver.AddConv2D();
+resolver.AddDepthwiseConv2D();
+resolver.AddMaxPool2D();
+resolver.AddAveragePool2D();
+resolver.AddFullyConnected();
+resolver.AddReshape();
+resolver.AddSoftmax();
+resolver.AddQuantize();
+resolver.AddDequantize();
+resolver.AddAdd();
+resolver.AddMul();
+resolver.AddRelu();
+resolver.AddMean();
+
 // depois vamos adicionar as ops necessárias aqui
 
   // 3) Arena na PSRAM (8MB): essencial para CNN
@@ -231,8 +245,14 @@ static tflite::MicroMutableOpResolver<10> resolver;
     // Dequantiza só para facilitar leitura humana (não é “probabilidade” garantida, mas ajuda).
     float best_f = (best_q - output->params.zero_point) * output->params.scale;
 
-    ESP_LOGI(TAG, "Pred=%d score_q=%d score_f=%g (n=%d)", best_idx, (int)best_q, best_f, n);
+    static int loop_count = 0;
+    loop_count++;
 
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    if (loop_count % 5 == 0) {
+        ESP_LOGI(TAG, "Pred=%d score_q=%d score_f=%g (n=%d)",
+                best_idx, (int)best_q, best_f, n);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
   }
 }
