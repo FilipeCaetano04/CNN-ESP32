@@ -95,12 +95,13 @@ def processar_e_enviar(caminho_img):
             if response.status_code == 200:
                 res = response.json()
                 letra = CLASSES[res['index']]
+                time = res['time_ms']
                 placa_final += letra
-                print(f"Detectado [{i+1}/7]: {letra} (Confiança: {res['score']:.2f})")
+                print(f"Detectado [{i+1}/7]: {letra} (Confiança: {res['score']:.2f}, Tempo: {time}ms)")
         except Exception as e:
             print(f"Erro no caractere {i+1}: {e}")
 
     print(f"\n[ RESULTADO FINAL: {placa_final} ]")
 
 if __name__ == "__main__":
-    processar_e_enviar("scripts/imgplaca2.png")
+    processar_e_enviar("scripts/imgplaca4.png")
