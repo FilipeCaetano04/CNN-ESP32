@@ -21,8 +21,8 @@ static const char *TAG = "IA_WIFI_SERVER";
 const int IMG_BYTES = 64 * 64; // 4096 bytes
 
 // --- CONFIGURAÇÃO DO SEU WI-FI ---
-#define WIFI_SSID      "VIVOFIBRA-58E1"
-#define WIFI_PASS      "HHxyr3PHnr"
+#define WIFI_SSID      "iPhone (3)"
+#define WIFI_PASS      "ldm12345"
 
 // Objetos Globais para o TFLite
 tflite::MicroInterpreter* static_interpreter = nullptr;
