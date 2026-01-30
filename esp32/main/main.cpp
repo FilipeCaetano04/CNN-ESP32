@@ -1,174 +1,171 @@
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
-#include <algorithm>
-#include <inttypes.h>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
+#include "esp_wifi.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_http_server.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
-#include "esp_system.h"
 
-#include "driver/uart.h"
-
-// TFLite Micro
+// TFLite Micro Headers
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/micro/micro_log.h"
 
-// Modelo TFLite em .h
 #include "modelo_placa_int8.h"
 
-static const char* TAG = "placa_tflm";
-const int UART_BUF_SIZE = 1024;
-const int IMG_BYTES = 64 * 64;
+static const char *TAG = "IA_WIFI_SERVER";
+const int IMG_BYTES = 64 * 64; // 4096 bytes
 
-// Helpers
+// --- CONFIGURAÇÃO DO SEU WI-FI ---
+#define WIFI_SSID      "VIVOFIBRA-58E1"
+#define WIFI_PASS      "HHxyr3PHnr"
+
+// Objetos Globais para o TFLite
+tflite::MicroInterpreter* static_interpreter = nullptr;
+TfLiteTensor* input = nullptr;
+TfLiteTensor* output = nullptr;
+
+// Helpers de Quantização (Mantidos do seu código original)
 static inline int8_t clamp_int8(int v) {
-  if (v < -128) return -128;
-  if (v > 127) return 127;
-  return (int8_t)v;
+    if (v < -128) return -128;
+    if (v > 127) return 127;
+    return (int8_t)v;
 }
 
-// No treino -> [0...255] x = (pixel / 127.5) - 1.0 -> saida [-1...1] 
 static inline float preprocess_pixel_to_float(uint8_t gray_u8) {
-  return (gray_u8 / 127.5f) - 1.0f; 
+    return (gray_u8 / 127.5f) - 1.0f; 
 }
 
 static inline int8_t quantize_float_to_int8(float x, float scale, int zero_point) {
-  // q = round(x/scale) + zp
-  int q = (int)lrintf(x / scale) + zero_point;
-  return clamp_int8(q);
+    int q = (int)lrintf(x / scale) + zero_point;
+    return clamp_int8(q);
 }
 
-// Função de Inicialização da UART
-void init_uart() {
-    const uart_config_t uart_config = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
+// Handler da requisição HTTP POST
+esp_err_t predict_handler(httpd_req_t *req) {
+    uint8_t *rx_buffer = (uint8_t *)malloc(IMG_BYTES);
+    if (!rx_buffer) {
+        ESP_LOGE(TAG, "Falha ao alocar buffer de recepção");
+        return ESP_FAIL;
+    }
+
+    // Recebe os bytes da imagem vindos do Python
+    int ret = httpd_req_recv(req, (char *)rx_buffer, IMG_BYTES);
+    if (ret <= 0) {
+        free(rx_buffer);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Imagem recebida via Wi-Fi. Processando...");
+
+    // Pré-processamento e Injeção no Tensor de Entrada
+    const float sc = input->params.scale;
+    const int zp = input->params.zero_point;
+    for (int i = 0; i < IMG_BYTES; i++) {
+        float normalized = preprocess_pixel_to_float(rx_buffer[i]);
+        input->data.int8[i] = quantize_float_to_int8(normalized, sc, zp);
+    }
+    free(rx_buffer);
+
+    // Medição do Tempo de Inferência
+    int64_t start_time = esp_timer_get_time();
+    TfLiteStatus invoke_status = static_interpreter->Invoke();
+    int64_t end_time = esp_timer_get_time();
+    float duration_ms = (end_time - start_time) / 1000.0f;
+
+    if (invoke_status != kTfLiteOk) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    // Encontrar a melhor classe (0-35)
+    int8_t max_score = -128;
+    int best_idx = 0;
+    for (int i = 0; i < 36; i++) {
+        if (output->data.int8[i] > max_score) {
+            max_score = output->data.int8[i];
+            best_idx = i;
+        }
+    }
+
+    // Enviar resposta JSON
+    char resp_str[128];
+    snprintf(resp_str, sizeof(resp_str), 
+             "{\"index\": %d, \"score\": %d, \"time_ms\": %.2f}", 
+             best_idx, (int)max_score, duration_ms);
     
-    uart_driver_install(UART_NUM_0, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
-    uart_param_config(UART_NUM_0, &uart_config);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+    
+    ESP_LOGI(TAG, "Predição enviada: Classe %d, Tempo %.2fms", best_idx, duration_ms);
+    return ESP_OK;
 }
 
-// App 
+// Event Handler do Wi-Fi para mostrar o IP no monitor
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Conectado! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+void wifi_init() {
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+    
+    wifi_config_t wifi_config = {};
+    strncpy((char*)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
+    strncpy((char*)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password));
+    
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_connect());
+}
+
 extern "C" void app_main(void) {
-  
-  init_uart();
-
-  ESP_LOGI(TAG, "Boot realizado. Heap free=%lu", (unsigned long)esp_get_free_heap_size());
-
-  // 1) Carregar o modelo do array .h
-  const tflite::Model* model = tflite::GetModel(modelo_placa_int8);
-  if (model->version() != TFLITE_SCHEMA_VERSION) {
-    ESP_LOGE(TAG, "Schema incompatível: model=%" PRIu32 " runtime=%" PRIu32, (uint32_t)model->version(), (uint32_t)TFLITE_SCHEMA_VERSION);
-    return;
-  }
-
-  // 2) Resolver Operações
-  static tflite::MicroMutableOpResolver<13> resolver;
-  resolver.AddConv2D();
-  resolver.AddDepthwiseConv2D();
-  resolver.AddMaxPool2D();
-  resolver.AddAveragePool2D();
-  resolver.AddFullyConnected();
-  resolver.AddReshape();
-  resolver.AddSoftmax();
-  resolver.AddQuantize();
-  resolver.AddDequantize();
-  resolver.AddAdd();
-  resolver.AddMul();
-  resolver.AddRelu();
-  resolver.AddMean();
-
-  // 3) Arena na PSRAM (8MB)
-  constexpr size_t kTensorArenaSize = 600 * 1024;
-  uint8_t* tensor_arena = (uint8_t*)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  
-  if (!tensor_arena) {
-    ESP_LOGE(TAG, "Falha ao alocar tensor_arena (%u bytes) na PSRAM", (unsigned)kTensorArenaSize);
-    return;
-  }
-
-  // 4) Criar o interpreter
-  static tflite::MicroInterpreter interpreter(model, resolver, tensor_arena, kTensorArenaSize);
-
-  // 5) Alocar tensores
-  if (interpreter.AllocateTensors() != kTfLiteOk) {
-    ESP_LOGE(TAG, "AllocateTensors falhou. Aumente kTensorArenaSize.");
-    return;
-  }
-
-  TfLiteTensor* input  = interpreter.input(0);
-  TfLiteTensor* output = interpreter.output(0);
-
-  uint8_t rx_buffer[IMG_BYTES];
-
-  // Debug: valida shape e quantização
-  ESP_LOGI(TAG, "Input: type=%d bytes=%d dims=%d [", input->type, input->bytes, input->dims->size);
-  for (int i = 0; i < input->dims->size; i++) {
-    printf("%d%s", input->dims->data[i], (i+1<input->dims->size)?",":"");
-  }
-  printf("] scale=%g zp=%" PRId32 "\n", input->params.scale, (int32_t)input->params.zero_point);
-
-  ESP_LOGI(TAG, "Output: type=%d bytes=%d dims=%d [", output->type, output->bytes, output->dims->size);
-  for (int i = 0; i < output->dims->size; i++) {
-    printf("%d%s", output->dims->data[i], (i+1<output->dims->size)?",":"");
-  }
-  printf("] scale=%g zp=%" PRId32 "\n", output->params.scale, (int32_t)output->params.zero_point);
-
-  if (input->dims->size == 4) {
-    int h = input->dims->data[1];
-    int w = input->dims->data[2];
-    int c = input->dims->data[3];
-    if (!(h == 64 && w == 64 && c == 1)) {
-      ESP_LOGW(TAG, "Input não é 64x64x1 (é %dx%dx%d). Ajuste preprocess/resize.", h, w, c);
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
-  }
+    ESP_ERROR_CHECK(ret);
 
-  // Loop de inferência
-  while (true) {
+    wifi_init();
 
-    printf("AGUARDANDO_IMAGEM\n");
+    // Setup TFLite (Suas 13 Ops mantidas)
+    const tflite::Model* model = tflite::GetModel(modelo_placa_int8);
+    static tflite::MicroMutableOpResolver<13> resolver;
+    resolver.AddConv2D(); resolver.AddDepthwiseConv2D(); resolver.AddMaxPool2D();
+    resolver.AddAveragePool2D(); resolver.AddFullyConnected(); resolver.AddReshape();
+    resolver.AddSoftmax(); resolver.AddQuantize(); resolver.AddDequantize();
+    resolver.AddAdd(); resolver.AddMul(); resolver.AddRelu(); resolver.AddMean();
 
-    int rx_bytes = uart_read_bytes(UART_NUM_0, rx_buffer, IMG_BYTES, portMAX_DELAY);
+    size_t arena_size = 600 * 1024;
+    uint8_t* arena = (uint8_t*)heap_caps_malloc(arena_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    
+    static tflite::MicroInterpreter interpreter(model, resolver, arena, arena_size);
+    interpreter.AllocateTensors();
+    static_interpreter = &interpreter;
+    input = interpreter.input(0);
+    output = interpreter.output(0);
 
-    if (rx_bytes == IMG_BYTES) {
-        ESP_LOGI(TAG, "Imagem capturada via Serial. Processando...");
-
-        // Passo C: Normalizar e Quantizar cada pixel recebido
-        const float sc = input->params.scale;
-        const int zp = input->params.zero_point;
-
-        for (int i = 0; i < IMG_BYTES; i++) {
-            float x = preprocess_pixel_to_float(rx_buffer[i]);
-            input->data.int8[i] = quantize_float_to_int8(x, sc, zp);
-        }
-
-        // Passo D: Rodar Inferência
-        if (interpreter.Invoke() == kTfLiteOk) {
-            int8_t max_score = -128;
-            int best_idx = 0;
-            for (int i = 0; i < 36; i++) {
-                if (output->data.int8[i] > max_score) {
-                    max_score = output->data.int8[i];
-                    best_idx = i;
-                }
-            }
-            // Passo E: Retornar resultado ao PC
-            printf("RESULTADO_PREDICAO:%d:%d\n", best_idx, (int)max_score);
-        } else {
-            ESP_LOGE(TAG, "Falha no Invoke");
-        }
+    // Iniciar Servidor HTTP na porta 80
+    httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    if (httpd_start(&server, &config) == ESP_OK) {
+        httpd_uri_t uri_predict = {
+            .uri = "/predict", .method = HTTP_POST, .handler = predict_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &uri_predict);
+        ESP_LOGI(TAG, "Servidor HTTP iniciado. Endpoint: /predict");
     }
-
-    vTaskDelay(pdMS_TO_TICKS(5000));
-  }
 }

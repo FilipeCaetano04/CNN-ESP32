@@ -1,33 +1,37 @@
-import serial
-import time
+import requests
+import numpy as np
 from PIL import Image
 
-PORTA_SERIAL = '/dev/ttyUSB0' 
-BAUD_RATE = 115200
+# SUBSTITUA PELO IP QUE APARECER NO MONITOR SERIAL DA ESP32
+ESP32_URL = "http://192.168.15.9/predict" 
 
-def predict_image(image_path):
-    # 1. Prepara a imagem, mesmo padrão do treino
+CLASSES = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+def send_image(image_path):
+     
+#Prepara a imagem (Resize para 64x64 e Grayscale)
     img = Image.open(image_path).convert('L').resize((64, 64))
-    raw_bytes = bytes(list(img.getdata()))
+    raw_bytes = np.array(img, dtype=np.uint8).tobytes()
 
-    with serial.Serial(PORTA_SERIAL, BAUD_RATE, timeout=2) as ser:
-        print(f"Enviando {image_path}...")
-        
-        while True:
-            line = ser.readline().decode(errors='ignore').strip()
-            # Espera o sinal de pronto do ESP32
-            if "AGUARDANDO_IMAGEM" in line:
-                ser.write(raw_bytes)
-                break
-        
-        # 2. Captura o resultado da placa
-        while True:
-            res = ser.readline().decode(errors='ignore').strip()
-            if "RESULTADO_PREDICAO" in res:
-                parts = res.split(':')
-                print(f"Sucesso! Classe: {parts[1]} | Score Quantizado: {parts[2]}")
-                break
+    print(f"Enviando imagem {image_path} para {ESP32_URL}...")
+
+    try:
+         #Envia como binário puro no corpo do POST
+        response = requests.post(ESP32_URL, data=raw_bytes, timeout=10)
+
+        if response.status_code == 200:
+            res = response.json()
+            caractere = CLASSES[res['index']]
+            print("-" * 30)
+            print(f"✅ RESULTADO: {caractere}")
+            print(f"📊 Confiança: {res['score']}")
+            print(f"⏱️  Tempo de Inferência: {res['time_ms']} ms")
+            print("-" * 30)
+        else:
+            print(f"❌ Erro no servidor: {response.status_code}")
+
+    except Exception as e:
+        print(f"❌ Falha na conexão: {e}")
 
 if __name__ == "__main__":
-    # Coloque aqui o caminho da imagem que quer testar
-    predict_image('minha_letra_a.jpg')
+    send_image('scripts/imgA.jpg')
