@@ -29,7 +29,7 @@ tflite::MicroInterpreter* static_interpreter = nullptr;
 TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
 
-// Helpers de Quantização (Mantidos do seu código original)
+// Helpers de Quantização
 static inline int8_t clamp_int8(int v) {
     if (v < -128) return -128;
     if (v > 127) return 127;
@@ -141,7 +141,7 @@ extern "C" void app_main(void) {
 
     wifi_init();
 
-    // Setup TFLite (Suas 13 Ops mantidas)
+    // Setup TFLite
     const tflite::Model* model = tflite::GetModel(modelo_placa_int8);
     static tflite::MicroMutableOpResolver<13> resolver;
     resolver.AddConv2D(); resolver.AddDepthwiseConv2D(); resolver.AddMaxPool2D();

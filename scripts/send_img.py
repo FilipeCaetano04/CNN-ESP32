@@ -15,8 +15,7 @@ if not os.path.exists(DEBUG_FOLDER):
 def resize_com_padding(fatia, size=64):
     h, w = fatia.shape[:2]
 
-    #Baseado no seu treino (96px de letra em 128px de imagem = 0.75)
-    #Vamos manter 75% de ocupação para bater com o dataset
+    #Baseado no treino (96px de letra em 128px de imagem = 0.75)
     margem_alvo = int(size * 0.75) 
 
     escala = margem_alvo / max(h, w)
@@ -24,7 +23,7 @@ def resize_com_padding(fatia, size=64):
 
     fatia_redimensionada = cv2.resize(fatia, (nova_w, nova_h), interpolation=cv2.INTER_AREA)
 
-    #Binarização agressiva após o resize para evitar anti-aliasing (cinzas)
+    #Binarização agressiva após o resize para evitar cinzas
     _, fatia_redimensionada = cv2.threshold(fatia_redimensionada, 128, 255, cv2.THRESH_BINARY)
 
     fundo_quadrado = np.full((size, size), 255, dtype=np.uint8)
@@ -36,14 +35,12 @@ def resize_com_padding(fatia, size=64):
 
 
 def extrair_caracteres(img_gray):
-    # Padroniza largura para estabilizar os filtros
     largura_std = 600
     proporcao = largura_std / float(img_gray.shape[1])
     altura_std = int(img_gray.shape[0] * proporcao)
     img_res = cv2.resize(img_gray, (largura_std, altura_std))
 
     # Threshold para detecção: O OpenCV prefere achar objetos BRANCOS no fundo PRETO
-    # Por isso usamos o THRESH_BINARY_INV aqui apenas para localizar os retângulos
     _, binary_for_contours = cv2.threshold(img_res, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     contours, _ = cv2.findContours(binary_for_contours, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -87,7 +84,6 @@ def processar_e_enviar(caminho_img):
         #Garante 0 ou 255 absoluto (sem meios-tons)
         fatia_64 = np.where(fatia_64 < 128, 0, 255).astype(np.uint8)
 
-        #DEBUG: Compare este arquivo com suas imagens de treino A e B
         cv2.imwrite(f"{DEBUG_FOLDER}/char{i}.jpg", fatia_64)
         try:
             # Envia os bytes para a ESP32
