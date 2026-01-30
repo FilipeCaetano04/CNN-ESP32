@@ -26,6 +26,9 @@
 // ===== Seu modelo (TFLite em array .h) =====
 #include "modelo_placa_int8.h"
 
+// imagem de teste 64x64 em array .h
+#include "img64.h"
+
 // ===== (Opcional) Câmera =====
 // OBS: pinout varia por placa/módulo. Deixei o esqueleto.
 #define USE_CAMERA 0
@@ -71,6 +74,19 @@ static void fill_input_constant_gray(TfLiteTensor* input, uint8_t gray_u8) {
 
   for (int i = 0; i < total; i++) {
     input->data.int8[i] = q;
+  }
+}
+
+// Preenche input usando imagem 8-bit grayscale (64x64) em array
+static void fill_input_from_image(TfLiteTensor* input, const uint8_t* img) {
+  const float sc = input->params.scale;
+  const int zp = input->params.zero_point;
+
+  const int total = input->bytes; // deve ser 4096
+
+  for (int i = 0; i < total; i++) {
+    float x = preprocess_pixel_to_float(img[i]); // 0..255 → [-1..1]
+    input->data.int8[i] = quantize_float_to_int8(x, sc, zp);
   }
 }
 
@@ -217,9 +233,9 @@ resolver.AddMean();
     esp_camera_fb_return(fb);
 
 #else
-    // ======== Caminho sem câmera (teste imediato) ========
-    // Preenche com um cinza médio (128), mas respeitando normalização [-1..1] e quantização do modelo.
-    fill_input_constant_gray(input, 128);
+    // ======== Caminho sem câmera (teste com imagem 64x64) ========
+    // Modelo lê fundos brancos -> NÃO inverter (invert=false)
+    fill_input_from_image(input, g_img64);
 #endif
 
     // Rodar inferência
